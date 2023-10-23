@@ -1,63 +1,64 @@
-# coding: utf-8
+from __future__ import annotations
 
+import enum
 import functools
+import gc
 import itertools
-import logging
-import os
 import random
 import select
 import sys
 import threading
-from collections import deque
-import collections.abc
-from contextlib import contextmanager
 import warnings
-import weakref
-import enum
-
+from collections import deque
+from collections.abc import Callable, Iterator
+from contextlib import AbstractAsyncContextManager, contextmanager
 from contextvars import copy_context
+from heapq import heapify, heappop, heappush
 from math import inf
 from time import perf_counter
-from typing import Callable, TYPE_CHECKING
-
-from sniffio import current_async_library_cvar
+from types import TracebackType
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVar
 
 import attr
-from heapq import heapify, heappop, heappush
-from sortedcontainers import SortedDict
 from outcome import Error, Outcome, Value, capture
+from sniffio import current_async_library_cvar
+from sortedcontainers import SortedDict
 
+from .. import _core
+from .._util import Final, NoPublicConstructor, coroutine_or_error
+from ._asyncgens import AsyncGenerators
 from ._entry_queue import EntryQueue, TrioToken
-from ._exceptions import TrioInternalError, RunFinishedError, Cancelled
-from ._ki import (
-    LOCALS_KEY_KI_PROTECTION_ENABLED,
-    KIManager,
-    enable_ki_protection,
-)
-from ._multierror import MultiError
+from ._exceptions import Cancelled, RunFinishedError, TrioInternalError
+from ._instrumentation import Instruments
+from ._ki import LOCALS_KEY_KI_PROTECTION_ENABLED, KIManager, enable_ki_protection
+from ._multierror import MultiError, concat_tb
+from ._thread_cache import start_thread_soon
 from ._traps import (
     Abort,
-    wait_task_rescheduled,
-    cancel_shielded_checkpoint,
     CancelShieldedCheckpoint,
     PermanentlyDetachCoroutineObject,
     WaitTaskRescheduled,
+    cancel_shielded_checkpoint,
+    wait_task_rescheduled,
 )
-from ._asyncgens import AsyncGenerators
-from ._thread_cache import start_thread_soon
-from ._instrumentation import Instruments
-from .. import _core
-from .._deprecate import warn_deprecated
-from .._util import Final, NoPublicConstructor, coroutine_or_error
 
-DEADLINE_HEAP_MIN_PRUNE_THRESHOLD = 1000
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup
 
-_NO_SEND = object()
+if TYPE_CHECKING:
+    # An unfortunate name collision here with trio._util.Final
+    from typing_extensions import Final as FinalT
+
+DEADLINE_HEAP_MIN_PRUNE_THRESHOLD: FinalT = 1000
+
+_NO_SEND: FinalT = object()
+
+FnT = TypeVar("FnT", bound="Callable[..., Any]")
 
 
 # Decorator to mark methods public. This does nothing by itself, but
 # trio/_tools/gen_exports.py looks for it.
-def _public(fn):
+def _public(fn: FnT) -> FnT:
     return fn
 
 
@@ -66,20 +67,31 @@ def _public(fn):
 # variable to True, and registers the Random instance _r for Hypothesis
 # to manage for each test case, which together should make Trio's task
 # scheduling loop deterministic.  We have a test for that, of course.
-_ALLOW_DETERMINISTIC_SCHEDULING = False
+_ALLOW_DETERMINISTIC_SCHEDULING: FinalT = False
 _r = random.Random()
 
 
-# On 3.7+, Context.run() is implemented in C and doesn't show up in
-# tracebacks. On 3.6, we use the contextvars backport, which is
-# currently implemented in Python and adds 1 frame to tracebacks. So this
-# function is a super-overkill version of "0 if sys.version_info >= (3, 7)
-# else 1". But if Context.run ever changes, we'll be ready!
-#
-# This can all be removed once we drop support for 3.6.
-def _count_context_run_tb_frames():
-    def function_with_unique_name_xyzzy():
-        1 / 0
+def _count_context_run_tb_frames() -> int:
+    """Count implementation dependent traceback frames from Context.run()
+
+    On CPython, Context.run() is implemented in C and doesn't show up in
+    tracebacks. On PyPy, it is implemented in Python and adds 1 frame to
+    tracebacks.
+
+    Returns:
+        int: Traceback frame count
+
+    """
+
+    def function_with_unique_name_xyzzy() -> NoReturn:
+        try:
+            1 / 0
+        except ZeroDivisionError:
+            raise
+        else:  # pragma: no cover
+            raise TrioInternalError(
+                "A ZeroDivisionError should have been raised, but it wasn't."
+            )
 
     ctx = copy_context()
     try:
@@ -87,15 +99,20 @@ def _count_context_run_tb_frames():
     except ZeroDivisionError as exc:
         tb = exc.__traceback__
         # Skip the frame where we caught it
-        tb = tb.tb_next
+        tb = tb.tb_next  # type: ignore[union-attr]
         count = 0
-        while tb.tb_frame.f_code.co_name != "function_with_unique_name_xyzzy":
-            tb = tb.tb_next
+        while tb.tb_frame.f_code.co_name != "function_with_unique_name_xyzzy":  # type: ignore[union-attr]
+            tb = tb.tb_next  # type: ignore[union-attr]
             count += 1
         return count
+    else:  # pragma: no cover
+        raise TrioInternalError(
+            f"The purpose of {function_with_unique_name_xyzzy.__name__} is "
+            "to raise a ZeroDivisionError, but it didn't."
+        )
 
 
-CONTEXT_RUN_TB_FRAMES = _count_context_run_tb_frames()
+CONTEXT_RUN_TB_FRAMES: FinalT = _count_context_run_tb_frames()
 
 
 @attr.s(frozen=True, slots=True)
@@ -103,18 +120,18 @@ class SystemClock:
     # Add a large random offset to our clock to ensure that if people
     # accidentally call time.perf_counter() directly or start comparing clocks
     # between different runs, then they'll notice the bug quickly:
-    offset = attr.ib(factory=lambda: _r.uniform(10000, 200000))
+    offset: float = attr.ib(factory=lambda: _r.uniform(10000, 200000))
 
-    def start_clock(self):
+    def start_clock(self) -> None:
         pass
 
     # In cPython 3, on every platform except Windows, perf_counter is
     # exactly the same as time.monotonic; and on Windows, it uses
     # QueryPerformanceCounter instead of GetTickCount64.
-    def current_time(self):
+    def current_time(self) -> float:
         return self.offset + perf_counter()
 
-    def deadline_to_sleep_time(self, deadline):
+    def deadline_to_sleep_time(self, deadline: float) -> float:
         return deadline - self.current_time()
 
 
@@ -126,6 +143,31 @@ class IdlePrimedTypes(enum.Enum):
 ################################################################
 # CancelScope and friends
 ################################################################
+
+
+def collapse_exception_group(excgroup):
+    """Recursively collapse any single-exception groups into that single contained
+    exception.
+
+    """
+    exceptions = list(excgroup.exceptions)
+    modified = False
+    for i, exc in enumerate(exceptions):
+        if isinstance(exc, BaseExceptionGroup):
+            new_exc = collapse_exception_group(exc)
+            if new_exc is not exc:
+                modified = True
+                exceptions[i] = new_exc
+
+    if len(exceptions) == 1 and isinstance(excgroup, MultiError) and excgroup.collapse:
+        exceptions[0].__traceback__ = concat_tb(
+            excgroup.__traceback__, exceptions[0].__traceback__
+        )
+        return exceptions[0]
+    elif modified:
+        return excgroup.derive(exceptions)
+    else:
+        return excgroup
 
 
 @attr.s(eq=False, slots=True)
@@ -434,15 +476,15 @@ class CancelScope(metaclass=Final):
     has been entered yet, and changes take immediate effect.
     """
 
-    _cancel_status = attr.ib(default=None, init=False)
-    _has_been_entered = attr.ib(default=False, init=False)
-    _registered_deadline = attr.ib(default=inf, init=False)
-    _cancel_called = attr.ib(default=False, init=False)
-    cancelled_caught = attr.ib(default=False, init=False)
+    _cancel_status: CancelStatus | None = attr.ib(default=None, init=False)
+    _has_been_entered: bool = attr.ib(default=False, init=False)
+    _registered_deadline: float = attr.ib(default=inf, init=False)
+    _cancel_called: bool = attr.ib(default=False, init=False)
+    cancelled_caught: bool = attr.ib(default=False, init=False)
 
     # Constructor arguments:
-    _deadline = attr.ib(default=inf, kw_only=True)
-    _shield = attr.ib(default=False, kw_only=True)
+    _deadline: float = attr.ib(default=inf, kw_only=True)
+    _shield: bool = attr.ib(default=False, kw_only=True)
 
     @enable_ki_protection
     def __enter__(self):
@@ -458,12 +500,6 @@ class CancelScope(metaclass=Final):
             self._cancel_status = CancelStatus(scope=self, parent=task._cancel_status)
             task._activate_cancel_status(self._cancel_status)
         return self
-
-    def _exc_filter(self, exc):
-        if isinstance(exc, Cancelled):
-            self.cancelled_caught = True
-            return None
-        return exc
 
     def _close(self, exc):
         if self._cancel_status is None:
@@ -522,17 +558,35 @@ class CancelScope(metaclass=Final):
             and self._cancel_status.effectively_cancelled
             and not self._cancel_status.parent_cancellation_is_visible_to_us
         ):
-            exc = MultiError.filter(self._exc_filter, exc)
+            if isinstance(exc, Cancelled):
+                self.cancelled_caught = True
+                exc = None
+            elif isinstance(exc, BaseExceptionGroup):
+                matched, exc = exc.split(Cancelled)
+                if matched:
+                    self.cancelled_caught = True
+
+                if exc:
+                    exc = collapse_exception_group(exc)
+
         self._cancel_status.close()
         with self._might_change_registered_deadline():
             self._cancel_status = None
         return exc
 
-    @enable_ki_protection
-    def __exit__(self, etype, exc, tb):
+    def __exit__(
+        self,
+        etype: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
         # NB: NurseryManager calls _close() directly rather than __exit__(),
         # so __exit__() must be just _close() plus this logic for adapting
         # the exception-filtering result to the context manager API.
+
+        # This inlines the enable_ki_protection decorator so we can fix
+        # f_locals *locally* below to avoid reference cycles
+        locals()[LOCALS_KEY_KI_PROTECTION_ENABLED] = True
 
         # Tracebacks show the 'raise' line below out of context, so let's give
         # this variable a name that makes sense out of context.
@@ -551,8 +605,15 @@ class CancelScope(metaclass=Final):
                 _, value, _ = sys.exc_info()
                 assert value is remaining_error_after_cancel_scope
                 value.__context__ = old_context
+                # delete references from locals to avoid creating cycles
+                # see test_cancel_scope_exit_doesnt_create_cyclic_garbage
+                del remaining_error_after_cancel_scope, value, _, exc
+                # deep magic to remove refs via f_locals
+                locals()
+                # TODO: check if PEP558 changes the need for this call
+                # https://github.com/python/cpython/pull/3640
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         if self._cancel_status is not None:
             binding = "active"
         elif self._has_been_entered:
@@ -575,11 +636,11 @@ class CancelScope(metaclass=Final):
                     "from now" if self._deadline >= now else "ago",
                 )
 
-        return "<trio.CancelScope at {:#x}, {}{}>".format(id(self), binding, state)
+        return f"<trio.CancelScope at {id(self):#x}, {binding}{state}>"
 
     @contextmanager
     @enable_ki_protection
-    def _might_change_registered_deadline(self):
+    def _might_change_registered_deadline(self) -> Iterator[None]:
         try:
             yield
         finally:
@@ -603,7 +664,7 @@ class CancelScope(metaclass=Final):
                         runner.force_guest_tick_asap()
 
     @property
-    def deadline(self):
+    def deadline(self) -> float:
         """Read-write, :class:`float`. An absolute time on the current
         run's clock at which this scope will automatically become
         cancelled. You can adjust the deadline by modifying this
@@ -629,12 +690,12 @@ class CancelScope(metaclass=Final):
         return self._deadline
 
     @deadline.setter
-    def deadline(self, new_deadline):
+    def deadline(self, new_deadline: float) -> None:
         with self._might_change_registered_deadline():
             self._deadline = float(new_deadline)
 
     @property
-    def shield(self):
+    def shield(self) -> bool:
         """Read-write, :class:`bool`, default :data:`False`. So long as
         this is set to :data:`True`, then the code inside this scope
         will not receive :exc:`~trio.Cancelled` exceptions from scopes
@@ -657,9 +718,9 @@ class CancelScope(metaclass=Final):
         """
         return self._shield
 
-    @shield.setter  # type: ignore  # "decorated property not supported"
+    @shield.setter
     @enable_ki_protection
-    def shield(self, new_value):
+    def shield(self, new_value: bool) -> None:
         if not isinstance(new_value, bool):
             raise TypeError("shield must be a bool")
         self._shield = new_value
@@ -667,7 +728,7 @@ class CancelScope(metaclass=Final):
             self._cancel_status.recalculate()
 
     @enable_ki_protection
-    def cancel(self):
+    def cancel(self) -> None:
         """Cancels this scope immediately.
 
         This method is idempotent, i.e., if the scope was already
@@ -681,7 +742,7 @@ class CancelScope(metaclass=Final):
             self._cancel_status.recalculate()
 
     @property
-    def cancel_called(self):
+    def cancel_called(self) -> bool:
         """Readonly :class:`bool`. Records whether cancellation has been
         requested for this scope, either by an explicit call to
         :meth:`cancel` or by the deadline expiring.
@@ -725,7 +786,7 @@ class _TaskStatus:
     _value = attr.ib(default=None)
 
     def __repr__(self):
-        return "<Task status object at {:#x}>".format(id(self))
+        return f"<Task status object at {id(self):#x}>"
 
     def started(self, value=None):
         if self._called_started:
@@ -780,6 +841,7 @@ class _TaskStatus:
         self._old_nursery._check_nursery_closed()
 
 
+@attr.s
 class NurseryManager:
     """Nursery context manager.
 
@@ -790,11 +852,15 @@ class NurseryManager:
 
     """
 
+    strict_exception_groups = attr.ib(default=False)
+
     @enable_ki_protection
     async def __aenter__(self):
         self._scope = CancelScope()
         self._scope.__enter__()
-        self._nursery = Nursery._create(current_task(), self._scope)
+        self._nursery = Nursery._create(
+            current_task(), self._scope, self.strict_exception_groups
+        )
         return self._nursery
 
     @enable_ki_protection
@@ -817,6 +883,9 @@ class NurseryManager:
                 _, value, _ = sys.exc_info()
                 assert value is combined_error_from_nursery
                 value.__context__ = old_context
+                # delete references from locals to avoid creating cycles
+                # see test_simple_cancel_scope_usage_doesnt_create_cyclic_garbage
+                del _, combined_error_from_nursery, value, new_exc
 
     def __enter__(self):
         raise RuntimeError(
@@ -827,15 +896,25 @@ class NurseryManager:
         assert False, """Never called, but should be defined"""
 
 
-def open_nursery():
+def open_nursery(
+    strict_exception_groups: bool | None = None,
+) -> AbstractAsyncContextManager[Nursery]:
     """Returns an async context manager which must be used to create a
     new `Nursery`.
 
     It does not block on entry; on exit it blocks until all child tasks
     have exited.
 
+    Args:
+      strict_exception_groups (bool): If true, even a single raised exception will be
+          wrapped in an exception group. This will eventually become the default
+          behavior. If not specified, uses the value passed to :func:`run`.
+
     """
-    return NurseryManager()
+    if strict_exception_groups is None:
+        strict_exception_groups = GLOBAL_RUN_CONTEXT.runner.strict_exception_groups
+
+    return NurseryManager(strict_exception_groups=strict_exception_groups)
 
 
 class Nursery(metaclass=NoPublicConstructor):
@@ -860,8 +939,9 @@ class Nursery(metaclass=NoPublicConstructor):
             in response to some external event.
     """
 
-    def __init__(self, parent_task, cancel_scope):
+    def __init__(self, parent_task, cancel_scope, strict_exception_groups):
         self._parent_task = parent_task
+        self._strict_exception_groups = strict_exception_groups
         parent_task._child_nurseries.append(self)
         # the cancel status that children inherit - we take a snapshot, so it
         # won't be affected by any changes in the parent.
@@ -909,7 +989,8 @@ class Nursery(metaclass=NoPublicConstructor):
         self._check_nursery_closed()
 
     async def _nested_child_finished(self, nested_child_exc):
-        """Returns MultiError instance if there are pending exceptions."""
+        # Returns MultiError instance (or any exception if the nursery is in loose mode
+        # and there is just one contained exception) if there are pending exceptions
         if nested_child_exc is not None:
             self._add_exc(nested_child_exc)
         self._nested_child_running = False
@@ -938,7 +1019,9 @@ class Nursery(metaclass=NoPublicConstructor):
         assert popped is self
         if self._pending_excs:
             try:
-                return MultiError(self._pending_excs)
+                return MultiError(
+                    self._pending_excs, _collapse=not self._strict_exception_groups
+                )
             finally:
                 # avoid a garbage cycle
                 # (see test_nursery_cancel_doesnt_create_cyclic_garbage)
@@ -947,18 +1030,17 @@ class Nursery(metaclass=NoPublicConstructor):
     def start_soon(self, async_fn, *args, name=None):
         """Creates a child task, scheduling ``await async_fn(*args)``.
 
-        This and :meth:`start` are the two fundamental methods for
+        If you want to run a function and immediately wait for its result,
+        then you don't need a nursery; just use ``await async_fn(*args)``.
+        If you want to wait for the task to initialize itself before
+        continuing, see :meth:`start`, the other fundamental method for
         creating concurrent tasks in Trio.
 
         Note that this is *not* an async function and you don't use await
         when calling it. It sets up the new task, but then returns
-        immediately, *before* it has a chance to run. The new task won’t
-        actually get a chance to do anything until some later point when
-        you execute a checkpoint and the scheduler decides to run it.
-        If you want to run a function and immediately wait for its result,
-        then you don't need a nursery; just use ``await async_fn(*args)``.
-        If you want to wait for the task to initialize itself before
-        continuing, see :meth:`start`.
+        immediately, *before* the new task has a chance to do anything.
+        New tasks may start running in any order, and at any checkpoint the
+        scheduler chooses - at latest when the nursery is waiting to exit.
 
         It's possible to pass a nursery object into another task, which
         allows that task to start new child tasks in the first task's
@@ -1001,9 +1083,9 @@ class Nursery(metaclass=NoPublicConstructor):
         The conventional way to define ``async_fn`` is like::
 
             async def async_fn(arg1, arg2, *, task_status=trio.TASK_STATUS_IGNORED):
-                ...
+                ...  # Caller is blocked waiting for this code to run
                 task_status.started()
-                ...
+                ...  # This async code can be interleaved with the caller
 
         :attr:`trio.TASK_STATUS_IGNORED` is a special global object with
         a do-nothing ``started`` method. This way your function supports
@@ -1068,7 +1150,7 @@ class Task(metaclass=NoPublicConstructor):
     name = attr.ib()
     # PEP 567 contextvars context
     context = attr.ib()
-    _counter = attr.ib(init=False, factory=itertools.count().__next__)
+    _counter: int = attr.ib(init=False, factory=itertools.count().__next__)
 
     # Invariant:
     # - for unscheduled tasks, _next_send_fn and _next_send are both None
@@ -1097,7 +1179,7 @@ class Task(metaclass=NoPublicConstructor):
     _schedule_points = attr.ib(default=0)
 
     def __repr__(self):
-        return "<Task {!r} at {:#x}>".format(self.name, id(self))
+        return f"<Task {self.name!r} at {id(self):#x}>"
 
     @property
     def parent_nursery(self):
@@ -1130,6 +1212,53 @@ class Task(metaclass=NoPublicConstructor):
 
         """
         return list(self._child_nurseries)
+
+    def iter_await_frames(self):
+        """Iterates recursively over the coroutine-like objects this
+        task is waiting on, yielding the frame and line number at each
+        frame.
+
+        This is similar to `traceback.walk_stack` in a synchronous
+        context. Note that `traceback.walk_stack` returns frames from
+        the bottom of the call stack to the top, while this function
+        starts from `Task.coro <trio.lowlevel.Task.coro>` and works it
+        way down.
+
+        Example usage: extracting a stack trace::
+
+            import traceback
+
+            def print_stack_for_task(task):
+                ss = traceback.StackSummary.extract(task.iter_await_frames())
+                print("".join(ss.format()))
+
+        """
+        coro = self.coro
+        while coro is not None:
+            if hasattr(coro, "cr_frame"):
+                # A real coroutine
+                yield coro.cr_frame, coro.cr_frame.f_lineno
+                coro = coro.cr_await
+            elif hasattr(coro, "gi_frame"):
+                # A generator decorated with @types.coroutine
+                yield coro.gi_frame, coro.gi_frame.f_lineno
+                coro = coro.gi_yieldfrom
+            elif coro.__class__.__name__ in [
+                "async_generator_athrow",
+                "async_generator_asend",
+            ]:
+                # cannot extract the generator directly, see https://github.com/python/cpython/issues/76991
+                # we can however use the gc to look through the object
+                for referent in gc.get_referents(coro):
+                    if hasattr(referent, "ag_frame"):
+                        yield referent.ag_frame, referent.ag_frame.f_lineno
+                        coro = referent.ag_await
+                        break
+                else:
+                    # either cpython changed or we are running on an alternative python implementation
+                    return
+            else:
+                return
 
     ################
     # Cancellation
@@ -1195,7 +1324,7 @@ class RunContext(threading.local):
     task: Task
 
 
-GLOBAL_RUN_CONTEXT = RunContext()
+GLOBAL_RUN_CONTEXT: FinalT = RunContext()
 
 
 @attr.s(frozen=True)
@@ -1277,11 +1406,12 @@ class Runner:
     instruments: Instruments = attr.ib()
     io_manager = attr.ib()
     ki_manager = attr.ib()
+    strict_exception_groups = attr.ib()
 
     # Run-local values, see _local.py
     _locals = attr.ib(factory=dict)
 
-    runq = attr.ib(factory=deque)
+    runq: deque[Task] = attr.ib(factory=deque)
     tasks = attr.ib(factory=set)
 
     deadlines = attr.ib(factory=Deadlines)
@@ -1416,8 +1546,9 @@ class Runner:
         if "task_scheduled" in self.instruments:
             self.instruments.call("task_scheduled", task)
 
-    def spawn_impl(self, async_fn, args, nursery, name, *, system_task=False):
-
+    def spawn_impl(
+        self, async_fn, args, nursery, name, *, system_task=False, context=None
+    ):
         ######
         # Make sure the nursery is in working order
         ######
@@ -1431,10 +1562,23 @@ class Runner:
             assert self.init_task is None
 
         ######
+        # Propagate contextvars, and make sure that async_fn can use sniffio.
+        ######
+        if context is None:
+            if system_task:
+                context = self.system_context.copy()
+            else:
+                context = copy_context()
+        # start_soon() or spawn_system_task() might have been invoked
+        # from a different async library; make sure the new task
+        # understands it's Trio-flavored.
+        context.run(current_async_library_cvar.set, "trio")
+
+        ######
         # Call the function and get the coroutine object, while giving helpful
         # errors for common mistakes.
         ######
-        coro = coroutine_or_error(async_fn, *args)
+        coro = context.run(coroutine_or_error, async_fn, *args)
 
         if name is None:
             name = async_fn
@@ -1442,14 +1586,9 @@ class Runner:
             name = name.func
         if not isinstance(name, str):
             try:
-                name = "{}.{}".format(name.__module__, name.__qualname__)
+                name = f"{name.__module__}.{name.__qualname__}"
             except AttributeError:
                 name = repr(name)
-
-        if system_task:
-            context = self.system_context.copy()
-        else:
-            context = copy_context()
 
         if not hasattr(coro, "cr_frame"):
             # This async function is implemented in C or Cython
@@ -1527,7 +1666,7 @@ class Runner:
     ################
 
     @_public
-    def spawn_system_task(self, async_fn, *args, name=None):
+    def spawn_system_task(self, async_fn, *args, name=None, context=None):
         """Spawn a "system" task.
 
         System tasks have a few differences from regular tasks:
@@ -1570,13 +1709,22 @@ class Runner:
               case is if you're wrapping a function before spawning a new
               task, you might pass the original function as the ``name=`` to
               make debugging easier.
+          context: An optional ``contextvars.Context`` object with context variables
+              to use for this task. You would normally get a copy of the current
+              context with ``context = contextvars.copy_context()`` and then you would
+              pass that ``context`` object here.
 
         Returns:
           Task: the newly spawned task
 
         """
         return self.spawn_impl(
-            async_fn, args, self.system_nursery, name, system_task=True
+            async_fn,
+            args,
+            self.system_nursery,
+            name,
+            system_task=True,
+            context=context,
         )
 
     async def init(self, async_fn, args):
@@ -1802,7 +1950,12 @@ class Runner:
 # 'is_guest' to see the special cases we need to handle this.
 
 
-def setup_runner(clock, instruments, restrict_keyboard_interrupt_to_checkpoints):
+def setup_runner(
+    clock,
+    instruments,
+    restrict_keyboard_interrupt_to_checkpoints,
+    strict_exception_groups,
+):
     """Create a Runner object and install it as the GLOBAL_RUN_CONTEXT."""
     # It wouldn't be *hard* to support nested calls to run(), but I can't
     # think of a single good reason for it, so let's be conservative for
@@ -1815,7 +1968,6 @@ def setup_runner(clock, instruments, restrict_keyboard_interrupt_to_checkpoints)
     instruments = Instruments(instruments)
     io_manager = TheIOManager()
     system_context = copy_context()
-    system_context.run(current_async_library_cvar.set, "trio")
     ki_manager = KIManager()
 
     runner = Runner(
@@ -1824,6 +1976,7 @@ def setup_runner(clock, instruments, restrict_keyboard_interrupt_to_checkpoints)
         io_manager=io_manager,
         system_context=system_context,
         ki_manager=ki_manager,
+        strict_exception_groups=strict_exception_groups,
     )
     runner.asyncgens.install_hooks(runner)
 
@@ -1840,7 +1993,8 @@ def run(
     *args,
     clock=None,
     instruments=(),
-    restrict_keyboard_interrupt_to_checkpoints=False,
+    restrict_keyboard_interrupt_to_checkpoints: bool = False,
+    strict_exception_groups: bool = False,
 ):
     """Run a Trio-flavored async function, and return the result.
 
@@ -1897,6 +2051,10 @@ def run(
           main thread (this is a Python limitation), or if you use
           :func:`open_signal_receiver` to catch SIGINT.
 
+      strict_exception_groups (bool): If true, nurseries will always wrap even a single
+          raised exception in an exception group. This can be overridden on the level of
+          individual nurseries. This will eventually become the default behavior.
+
     Returns:
       Whatever ``async_fn`` returns.
 
@@ -1913,7 +2071,10 @@ def run(
     __tracebackhide__ = True
 
     runner = setup_runner(
-        clock, instruments, restrict_keyboard_interrupt_to_checkpoints
+        clock,
+        instruments,
+        restrict_keyboard_interrupt_to_checkpoints,
+        strict_exception_groups,
     )
 
     gen = unrolled_run(runner, async_fn, args)
@@ -1938,10 +2099,11 @@ def start_guest_run(
     run_sync_soon_threadsafe,
     done_callback,
     run_sync_soon_not_threadsafe=None,
-    host_uses_signal_set_wakeup_fd=False,
+    host_uses_signal_set_wakeup_fd: bool = False,
     clock=None,
     instruments=(),
-    restrict_keyboard_interrupt_to_checkpoints=False,
+    restrict_keyboard_interrupt_to_checkpoints: bool = False,
+    strict_exception_groups: bool = False,
 ):
     """Start a "guest" run of Trio on top of some other "host" event loop.
 
@@ -1993,7 +2155,10 @@ def start_guest_run(
 
     """
     runner = setup_runner(
-        clock, instruments, restrict_keyboard_interrupt_to_checkpoints
+        clock,
+        instruments,
+        restrict_keyboard_interrupt_to_checkpoints,
+        strict_exception_groups,
     )
     runner.is_guest = True
     runner.guest_tick_scheduled = True
@@ -2018,14 +2183,19 @@ def start_guest_run(
 
 # 24 hours is arbitrary, but it avoids issues like people setting timeouts of
 # 10**20 and then getting integer overflows in the underlying system calls.
-_MAX_TIMEOUT = 24 * 60 * 60
+_MAX_TIMEOUT: FinalT = 24 * 60 * 60
 
 
 # Weird quirk: this is written as a generator in order to support "guest
 # mode", where our core event loop gets unrolled into a series of callbacks on
 # the host loop. If you're doing a regular trio.run then this gets run
 # straight through.
-def unrolled_run(runner, async_fn, args, host_uses_signal_set_wakeup_fd=False):
+def unrolled_run(
+    runner: Runner,
+    async_fn,
+    args,
+    host_uses_signal_set_wakeup_fd: bool = False,
+):
     locals()[LOCALS_KEY_KI_PROTECTION_ENABLED] = True
     __tracebackhide__ = True
 
@@ -2044,7 +2214,7 @@ def unrolled_run(runner, async_fn, args, host_uses_signal_set_wakeup_fd=False):
         # here is our event loop:
         while runner.tasks:
             if runner.runq:
-                timeout = 0
+                timeout: float = 0
             else:
                 deadline = runner.deadlines.next_deadline()
                 timeout = runner.clock.deadline_to_sleep_time(deadline)
@@ -2159,7 +2329,7 @@ def unrolled_run(runner, async_fn, args, host_uses_signal_set_wakeup_fd=False):
                 try:
                     # We used to unwrap the Outcome object here and send/throw
                     # its contents in directly, but it turns out that .throw()
-                    # is buggy, at least on CPython 3.6:
+                    # is buggy, at least before CPython 3.9:
                     #   https://bugs.python.org/issue29587
                     #   https://bugs.python.org/issue29590
                     # So now we send in the Outcome object and unwrap it on the
@@ -2172,8 +2342,10 @@ def unrolled_run(runner, async_fn, args, host_uses_signal_set_wakeup_fd=False):
                     # frame we always remove, because it's this function
                     # catching it, and then in addition we remove however many
                     # more Context.run adds.
-                    tb = task_exc.__traceback__.tb_next
-                    for _ in range(CONTEXT_RUN_TB_FRAMES):
+                    tb = task_exc.__traceback__
+                    for _ in range(1 + CONTEXT_RUN_TB_FRAMES):
+                        if tb is None:
+                            break
                         tb = tb.tb_next
                     final_outcome = Error(task_exc.with_traceback(tb))
                     # Remove local refs so that e.g. cancelled coroutine locals
@@ -2268,7 +2440,7 @@ class _TaskStatusIgnored:
         pass
 
 
-TASK_STATUS_IGNORED = _TaskStatusIgnored()
+TASK_STATUS_IGNORED: FinalT = _TaskStatusIgnored()
 
 
 def current_task():
@@ -2345,7 +2517,7 @@ async def checkpoint_if_cancelled():
 
     Equivalent to (but potentially more efficient than)::
 
-        if trio.current_deadline() == -inf:
+        if trio.current_effective_deadline() == -inf:
             await trio.lowlevel.checkpoint()
 
     This is either a no-op, or else it allow other tasks to be scheduled and
@@ -2364,16 +2536,16 @@ async def checkpoint_if_cancelled():
 
 
 if sys.platform == "win32":
-    from ._io_windows import WindowsIOManager as TheIOManager
     from ._generated_io_windows import *
+    from ._io_windows import WindowsIOManager as TheIOManager
 elif sys.platform == "linux" or (not TYPE_CHECKING and hasattr(select, "epoll")):
-    from ._io_epoll import EpollIOManager as TheIOManager
     from ._generated_io_epoll import *
+    from ._io_epoll import EpollIOManager as TheIOManager
 elif TYPE_CHECKING or hasattr(select, "kqueue"):
-    from ._io_kqueue import KqueueIOManager as TheIOManager
     from ._generated_io_kqueue import *
+    from ._io_kqueue import KqueueIOManager as TheIOManager
 else:  # pragma: no cover
     raise NotImplementedError("unsupported platform")
 
-from ._generated_run import *
 from ._generated_instrumentation import *
+from ._generated_run import *

@@ -1,11 +1,11 @@
 # Generic stream tests
 
-from contextlib import contextmanager
 import random
+from contextlib import contextmanager
 
 from .. import _core
+from .._abc import HalfCloseableStream, ReceiveStream, SendStream, Stream
 from .._highlevel_generic import aclose_forcefully
-from .._abc import SendStream, ReceiveStream, Stream, HalfCloseableStream
 from ._checkpoints import assert_checkpoints
 
 
@@ -31,7 +31,7 @@ def _assert_raises(exc):
     except exc:
         pass
     else:
-        raise AssertionError("expected exception: {}".format(exc))
+        raise AssertionError(f"expected exception: {exc}")
 
 
 async def check_one_way_stream(stream_maker, clogged_stream_maker):
@@ -408,8 +408,8 @@ async def check_two_way_stream(stream_maker, clogged_stream_maker):
         assert isinstance(s2, Stream)
 
         # Duplex can be a bit tricky, might as well check it as well
-        DUPLEX_TEST_SIZE = 2 ** 20
-        CHUNK_SIZE_MAX = 2 ** 14
+        DUPLEX_TEST_SIZE = 2**20
+        CHUNK_SIZE_MAX = 2**14
 
         r = random.Random(0)
         i = r.getrandbits(8 * DUPLEX_TEST_SIZE)

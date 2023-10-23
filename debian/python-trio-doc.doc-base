@@ -1,0 +1,8 @@
+Document: python-trio-doc
+Title: Python trio documentation
+Author: Nathaniel J. Smith <njs@pobox.com>
+Section: Programming/Python
+
+Format: HTML
+Index: /usr/share/doc/python-trio-doc/html/index.html
+Files: /usr/share/doc/python-trio-doc/html/*.html

@@ -1,0 +1,9 @@
+#!/bin/sh
+
+set -e
+
+cp -r pyproject.toml ${AUTOPKGTEST_TMP}
+cd ${AUTOPKGTEST_TMP}
+for p in $(py3versions -s); do
+    $p -m pytest --pyargs trio -m "not redistributors_should_skip" -p trio._tests.pytest_plugin
+done
