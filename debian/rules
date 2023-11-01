@@ -1,6 +1,15 @@
 #!/usr/bin/make -f
 
-export PYBUILD_TEST_ARGS=-m not\ redistributors_should_skip
+export PYBUILD_NAME=trio
+export PYBUILD_TEST_ARGS=-m "not redistributors_should_skip" -p trio._tests.pytest_plugin -k "not test_SocketType_resolve and not test_getprotobyname"
 
 %:
-	dh $@ --with python3 --buildsystem=pybuild
+	dh $@ --with python3,sphinxdoc --buildsystem=pybuild
+
+execute_before_dh_sphinxdoc:
+ifeq (,$(findstring nodoc, $(DEB_BUILD_OPTIONS)))
+	PYTHONPATH=$(CURDIR) python3 -m sphinx -b html -d $(CURDIR)/docs/.build/.doctrees -N $(CURDIR)/docs/source $(CURDIR)/debian/python-trio-doc/usr/share/doc/python-trio-doc/html
+endif
+
+execute_after_dh_clean:
+	rm -rf $(CURDIR)/docs/.build

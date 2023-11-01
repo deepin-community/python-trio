@@ -4,6 +4,7 @@ import errno
 from contextlib import contextmanager
 
 import trio
+
 from . import socket as tsocket
 from ._util import ConflictDetector, Final
 from .abc import HalfCloseableStream, Listener
@@ -30,9 +31,7 @@ def _translate_socket_errors_to_stream_errors():
         if exc.errno in _closed_stream_errnos:
             raise trio.ClosedResourceError("this socket was already closed") from None
         else:
-            raise trio.BrokenResourceError(
-                "socket connection broken: {}".format(exc)
-            ) from exc
+            raise trio.BrokenResourceError(f"socket connection broken: {exc}") from exc
 
 
 class SocketStream(HalfCloseableStream, metaclass=Final):
@@ -89,7 +88,7 @@ class SocketStream(HalfCloseableStream, metaclass=Final):
                 # http://devstreaming.apple.com/videos/wwdc/2015/719ui2k57m/719/719_your_app_and_next_generation_networks.pdf?dl=1
                 # ). The theory is that you want it to be bandwidth *
                 # rescheduling interval.
-                self.setsockopt(tsocket.IPPROTO_TCP, tsocket.TCP_NOTSENT_LOWAT, 2 ** 14)
+                self.setsockopt(tsocket.IPPROTO_TCP, tsocket.TCP_NOTSENT_LOWAT, 2**14)
             except OSError:
                 pass
 

@@ -1,34 +1,46 @@
 Source: python-trio
 Section: python
 Priority: optional
-Standards-Version: 4.2.1.2
-Maintainer: Robie Basak <robie@justgohome.co.uk>
-Build-Depends: debhelper,
-               debhelper-compat (= 13),
-               dh-python,
-               netbase,
-               pylint,
-               python3,
-               python3-astor,
-               python3-async-generator,
-               python3-attr,
-               python3-idna,
-               python3-jedi,
-               python3-openssl,
-               python3-outcome,
-               python3-pytest,
-               python3-setuptools,
-               python3-sniffio,
-               python3-sortedcontainers,
-               python3-trustme,
-               python3-yapf
-X-Python3-Version: >= 3.7
+Standards-Version: 4.6.2
+Maintainer: Debian Python Team <team+python@tracker.debian.org>
+Uploaders:
+ Robie Basak <robie@justgohome.co.uk>,
+ Michael Fladischer <fladi@debian.org>,
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-python,
+ pybuild-plugin-pyproject,
+ python3-all,
+ python3-astor,
+ python3-async-generator,
+ python3-attr,
+ python3-exceptiongroup,
+ python3-idna,
+ python3-jedi,
+ python3-openssl,
+ python3-outcome,
+ python3-pytest,
+ python3-setuptools,
+ python3-sniffio,
+ python3-sortedcontainers,
+ python3-sphinx,
+ python3-sphinx-rtd-theme,
+ python3-sphinxcontrib.trio,
+ python3-trustme,
+ python3-yapf,
 Homepage: https://github.com/python-trio/trio
+Vcs-Browser: https://salsa.debian.org/python-team/packages/python-trio
+Vcs-Git: https://salsa.debian.org/python-team/packages/python-trio.git
+Rules-Requires-Root: no
 
-Package: python3-trio
+Package: python-trio-doc
+Section: doc
 Architecture: all
-Depends: ${misc:Depends}, ${python3:Depends}
-Description: Python async concurrency and I/O library
+Multi-Arch: foreign
+Depends:
+ ${misc:Depends},
+ ${sphinxdoc:Depends},
+Description: Python async concurrency and I/O library (Documentation)
  Trio is a Python async concurrency and I/O library like Twisted or the asyncio
  standard library, but with an API rethink following lessons learned from
  asyncio and Dave Beazley's Curio. The author claims that the resulting design
@@ -38,3 +50,24 @@ Description: Python async concurrency and I/O library
  This project is young and still somewhat experimental. The API has not yet
  been declared stable. If you need more mature or with a more stable API,
  then Python's asyncio library, or the older Twisted, are probably better bets.
+ .
+ This package contains the documentation.
+
+Package: python3-trio
+Architecture: all
+Depends:
+ python3-exceptiongroup,
+ ${misc:Depends},
+ ${python3:Depends},
+Description: Python async concurrency and I/O library (Python3 version)
+ Trio is a Python async concurrency and I/O library like Twisted or the asyncio
+ standard library, but with an API rethink following lessons learned from
+ asyncio and Dave Beazley's Curio. The author claims that the resulting design
+ is radically simpler than older competitors like asyncio and Twisted, yet just
+ as capable.
+ .
+ This project is young and still somewhat experimental. The API has not yet
+ been declared stable. If you need more mature or with a more stable API,
+ then Python's asyncio library, or the older Twisted, are probably better bets.
+ .
+ This package contains the Python 3 version of the library.
