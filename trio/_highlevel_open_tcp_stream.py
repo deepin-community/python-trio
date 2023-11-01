@@ -1,7 +1,13 @@
+import sys
 from contextlib import contextmanager
 
 import trio
-from trio.socket import getaddrinfo, SOCK_STREAM, socket
+from trio._core._multierror import MultiError
+from trio.socket import SOCK_STREAM, getaddrinfo, socket
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import ExceptionGroup
+
 
 # Implementation of RFC 6555 "Happy eyeballs"
 # https://tools.ietf.org/html/rfc6555
@@ -114,8 +120,10 @@ def close_all():
                 sock.close()
             except BaseException as exc:
                 errs.append(exc)
-        if errs:
-            raise trio.MultiError(errs)
+        if len(errs) == 1:
+            raise errs[0]
+        elif errs:
+            raise MultiError(errs)
 
 
 def reorder_for_rfc_6555_section_5_4(targets):
@@ -139,9 +147,9 @@ def reorder_for_rfc_6555_section_5_4(targets):
 def format_host_port(host, port):
     host = host.decode("ascii") if isinstance(host, bytes) else host
     if ":" in host:
-        return "[{}]:{}".format(host, port)
+        return f"[{host}]:{port}"
     else:
-        return "{}:{}".format(host, port)
+        return f"{host}:{port}"
 
 
 # Twisted's HostnameEndpoint has a good set of configurables:
@@ -243,7 +251,7 @@ async def open_tcp_stream(
     if host is None:
         raise ValueError("host cannot be None")
     if not isinstance(port, int):
-        raise TypeError("port must be int, not {!r}".format(port))
+        raise TypeError(f"port must be int, not {port!r}")
 
     if happy_eyeballs_delay is None:
         happy_eyeballs_delay = DEFAULT_DELAY
@@ -364,7 +372,7 @@ async def open_tcp_stream(
             msg = "all attempts to connect to {} failed".format(
                 format_host_port(host, port)
             )
-            raise OSError(msg) from trio.MultiError(oserrors)
+            raise OSError(msg) from ExceptionGroup(msg, oserrors)
         else:
             stream = trio.SocketStream(winning_socket)
             open_sockets.remove(winning_socket)

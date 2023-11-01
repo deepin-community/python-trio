@@ -1,23 +1,25 @@
-# coding: utf-8
-
-import threading
+import contextvars
+import functools
+import inspect
 import queue as stdlib_queue
+import threading
 from itertools import count
+from typing import Optional
 
 import attr
-import inspect
 import outcome
+from sniffio import current_async_library_cvar
 
 import trio
 
-from ._sync import CapacityLimiter
 from ._core import (
-    enable_ki_protection,
-    disable_ki_protection,
     RunVar,
     TrioToken,
+    disable_ki_protection,
+    enable_ki_protection,
     start_thread_soon,
 )
+from ._sync import CapacityLimiter
 from ._util import coroutine_or_error
 
 # Global due to Threading API, thread local storage for trio token
@@ -56,7 +58,9 @@ class ThreadPlaceholder:
 
 
 @enable_ki_protection
-async def to_thread_run_sync(sync_fn, *args, cancellable=False, limiter=None):
+async def to_thread_run_sync(
+    sync_fn, *args, thread_name: Optional[str] = None, cancellable=False, limiter=None
+):
     """Convert a blocking operation into an async operation using a thread.
 
     These two lines are equivalent::
@@ -78,6 +82,12 @@ async def to_thread_run_sync(sync_fn, *args, cancellable=False, limiter=None):
           arguments, use :func:`functools.partial`.
       cancellable (bool): Whether to allow cancellation of this operation. See
           discussion below.
+      thread_name (str): Optional string to set the name of the thread.
+          Will always set `threading.Thread.name`, but only set the os name
+          if pthread.h is available (i.e. most POSIX installations).
+          pthread names are limited to 15 characters, and can be read from
+          ``/proc/<PID>/task/<SPID>/comm`` or with ``ps -eT``, among others.
+          Defaults to ``{sync_fn.__name__|None} from {trio.lowlevel.current_task().name}``.
       limiter (None, or CapacityLimiter-like object):
           An object used to limit the number of simultaneous threads. Most
           commonly this will be a `~trio.CapacityLimiter`, but it could be
@@ -135,6 +145,7 @@ async def to_thread_run_sync(sync_fn, *args, cancellable=False, limiter=None):
 
     """
     await trio.lowlevel.checkpoint_if_cancelled()
+    cancellable = bool(cancellable)  # raise early if cancellable.__bool__ raises
     if limiter is None:
         limiter = current_default_thread_limiter()
 
@@ -164,7 +175,11 @@ async def to_thread_run_sync(sync_fn, *args, cancellable=False, limiter=None):
 
     current_trio_token = trio.lowlevel.current_trio_token()
 
+    if thread_name is None:
+        thread_name = f"{getattr(sync_fn, '__name__', None)} from {trio.lowlevel.current_task().name}"
+
     def worker_fn():
+        current_async_library_cvar.set(None)
         TOKEN_LOCAL.token = current_trio_token
         try:
             ret = sync_fn(*args)
@@ -181,6 +196,9 @@ async def to_thread_run_sync(sync_fn, *args, cancellable=False, limiter=None):
         finally:
             del TOKEN_LOCAL.token
 
+    context = contextvars.copy_context()
+    contextvars_aware_worker_fn = functools.partial(context.run, worker_fn)
+
     def deliver_worker_fn_result(result):
         try:
             current_trio_token.run_sync_soon(report_back_in_trio_thread_fn, result)
@@ -192,7 +210,9 @@ async def to_thread_run_sync(sync_fn, *args, cancellable=False, limiter=None):
 
     await limiter.acquire_on_behalf_of(placeholder)
     try:
-        start_thread_soon(worker_fn, deliver_worker_fn_result)
+        start_thread_soon(
+            contextvars_aware_worker_fn, deliver_worker_fn_result, thread_name
+        )
     except:
         limiter.release_on_behalf_of(placeholder)
         raise
@@ -207,7 +227,7 @@ async def to_thread_run_sync(sync_fn, *args, cancellable=False, limiter=None):
     return await trio.lowlevel.wait_task_rescheduled(abort)
 
 
-def _run_fn_as_system_task(cb, fn, *args, trio_token=None):
+def _run_fn_as_system_task(cb, fn, *args, context, trio_token=None):
     """Helper function for from_thread.run and from_thread.run_sync.
 
     Since this internally uses TrioToken.run_sync_soon, all warnings about
@@ -233,8 +253,8 @@ def _run_fn_as_system_task(cb, fn, *args, trio_token=None):
     else:
         raise RuntimeError("this is a blocking function; call it from a thread")
 
-    q = stdlib_queue.Queue()
-    trio_token.run_sync_soon(cb, q, fn, args)
+    q = stdlib_queue.SimpleQueue()
+    trio_token.run_sync_soon(context.run, cb, q, fn, args)
     return q.get().unwrap()
 
 
@@ -282,14 +302,24 @@ def from_thread_run(afn, *args, trio_token=None):
         async def await_in_trio_thread_task():
             q.put_nowait(await outcome.acapture(unprotected_afn))
 
+        context = contextvars.copy_context()
         try:
-            trio.lowlevel.spawn_system_task(await_in_trio_thread_task, name=afn)
+            trio.lowlevel.spawn_system_task(
+                await_in_trio_thread_task, name=afn, context=context
+            )
         except RuntimeError:  # system nursery is closed
             q.put_nowait(
                 outcome.Error(trio.RunFinishedError("system nursery is closed"))
             )
 
-    return _run_fn_as_system_task(callback, afn, *args, trio_token=trio_token)
+    context = contextvars.copy_context()
+    return _run_fn_as_system_task(
+        callback,
+        afn,
+        *args,
+        context=context,
+        trio_token=trio_token,
+    )
 
 
 def from_thread_run_sync(fn, *args, trio_token=None):
@@ -324,6 +354,8 @@ def from_thread_run_sync(fn, *args, trio_token=None):
     """
 
     def callback(q, fn, args):
+        current_async_library_cvar.set("trio")
+
         @disable_ki_protection
         def unprotected_fn():
             ret = fn(*args)
@@ -341,4 +373,12 @@ def from_thread_run_sync(fn, *args, trio_token=None):
         res = outcome.capture(unprotected_fn)
         q.put_nowait(res)
 
-    return _run_fn_as_system_task(callback, fn, *args, trio_token=trio_token)
+    context = contextvars.copy_context()
+
+    return _run_fn_as_system_task(
+        callback,
+        fn,
+        *args,
+        context=context,
+        trio_token=trio_token,
+    )

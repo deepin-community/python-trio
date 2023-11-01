@@ -5,7 +5,7 @@ import attr
 import trio
 
 from . import _core
-from ._core import enable_ki_protection, ParkingLot
+from ._core import ParkingLot, enable_ki_protection
 from ._util import Final
 
 
@@ -87,21 +87,14 @@ class Event(metaclass=Final):
         return _EventStatistics(tasks_waiting=len(self._tasks))
 
 
-def async_cm(cls):
+class AsyncContextManagerMixin:
     @enable_ki_protection
     async def __aenter__(self):
         await self.acquire()
 
-    __aenter__.__qualname__ = cls.__qualname__ + ".__aenter__"
-    cls.__aenter__ = __aenter__
-
     @enable_ki_protection
     async def __aexit__(self, *args):
         self.release()
-
-    __aexit__.__qualname__ = cls.__qualname__ + ".__aexit__"
-    cls.__aexit__ = __aexit__
-    return cls
 
 
 @attr.s(frozen=True)
@@ -112,8 +105,7 @@ class _CapacityLimiterStatistics:
     tasks_waiting = attr.ib()
 
 
-@async_cm
-class CapacityLimiter(metaclass=Final):
+class CapacityLimiter(AsyncContextManagerMixin, metaclass=Final):
     """An object for controlling access to a resource with limited capacity.
 
     Sometimes you need to put a limit on how many tasks can do something at
@@ -253,8 +245,7 @@ class CapacityLimiter(metaclass=Final):
         """
         if borrower in self._borrowers:
             raise RuntimeError(
-                "this borrower is already holding one of this "
-                "CapacityLimiter's tokens"
+                "this borrower is already holding one of this CapacityLimiter's tokens"
             )
         if len(self._borrowers) < self._total_tokens and not self._lot:
             self._borrowers.add(borrower)
@@ -355,8 +346,7 @@ class CapacityLimiter(metaclass=Final):
         )
 
 
-@async_cm
-class Semaphore(metaclass=Final):
+class Semaphore(AsyncContextManagerMixin, metaclass=Final):
     """A `semaphore <https://en.wikipedia.org/wiki/Semaphore_(programming)>`__.
 
     A semaphore holds an integer value, which can be incremented by
@@ -405,7 +395,7 @@ class Semaphore(metaclass=Final):
         if self._max_value is None:
             max_value_str = ""
         else:
-            max_value_str = ", max_value={}".format(self._max_value)
+            max_value_str = f", max_value={self._max_value}"
         return "<trio.Semaphore({}{}) at {:#x}>".format(
             self._value, max_value_str, id(self)
         )
@@ -485,16 +475,15 @@ class _LockStatistics:
     tasks_waiting = attr.ib()
 
 
-@async_cm
 @attr.s(eq=False, hash=False, repr=False)
-class _LockImpl:
+class _LockImpl(AsyncContextManagerMixin):
     _lot = attr.ib(factory=ParkingLot, init=False)
     _owner = attr.ib(default=None, init=False)
 
     def __repr__(self):
         if self.locked():
             s1 = "locked"
-            s2 = " with {} waiters".format(len(self._lot))
+            s2 = f" with {len(self._lot)} waiters"
         else:
             s1 = "unlocked"
             s2 = ""
@@ -659,8 +648,7 @@ class _ConditionStatistics:
     lock_statistics = attr.ib()
 
 
-@async_cm
-class Condition(metaclass=Final):
+class Condition(AsyncContextManagerMixin, metaclass=Final):
     """A classic `condition variable
     <https://en.wikipedia.org/wiki/Monitor_(synchronization)>`__, similar to
     :class:`threading.Condition`.

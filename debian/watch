@@ -1,2 +1,4 @@
 version=4
-https://pypi.debian.net/trio/trio-(.+)\.(?:zip|tgz|tbz|txz|(?:tar\.(?:gz|bz2|xz)))
+opts=filenamemangle=s/.*\/v([\d\.]+.*)$/python-trio-$1/ \
+https://github.com/python-trio/trio/tags \
+/python-trio/trio/archive/refs/tags/v([\d\.]+)\.tar\.gz

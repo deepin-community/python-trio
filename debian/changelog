@@ -1,3 +1,67 @@
+python-trio (0.22.2-1) unstable; urgency=medium
+
+  * New upstream version 0.22.2
+
+ -- Michael Fladischer <fladi@debian.org>  Thu, 20 Jul 2023 19:07:39 +0000
+
+python-trio (0.22.1-1) unstable; urgency=medium
+
+  * Add debian/gbp.conf.
+  * Set DPT as maintainer and Robie Basak and myself as uploaders, as approved
+    by Robie.
+  * Run wrap-and-sort -bast to reduce diff size of future changes.
+  * Use github.com in d/watch.
+  * New upstream version 0.22.1
+  * Bump Standards-Version to 4.6.2.
+  * Remove X-Python3-Version field.
+  * Use DPT salsa repository for Vcs-* fields.
+  * Set Rules-Requires-Root: no.
+  * Install testfiles using d/pybuild.testfiles.
+  * Use included trio pytest plugin when running tests.
+  * Skip network related tests at build-time.
+  * Set PYBUILD_NAME.
+  * Remove debhelper, netbase and pylint from Build-Depends, not required
+    during build and tests.
+  * Replace python3 with python3-all in Build-Depends.
+  * Build using pybuild-plugin-pyproject.
+  * Clean up artifacts in trio.egg-info to allow two builds in a row.
+  * Enable upstream testsuite for autopkgtests.
+  * Add upstream metadata.
+  * Install README.rst.
+  * Build and ship documentation in python-trio-doc package.
+
+ -- Michael Fladischer <fladi@debian.org>  Fri, 07 Jul 2023 06:37:33 +0000
+
+python-trio (0.22.0-0.2) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Temporary add missing python3-exceptiongroup dependency for Python 3.10
+
+ -- Jochen Sprickerhof <jspricke@debian.org>  Mon, 09 Jan 2023 07:55:29 +0100
+
+python-trio (0.22.0-0.1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * New upstream version 0.22.0 (Closes: #1026155)
+
+ -- Jochen Sprickerhof <jspricke@debian.org>  Thu, 15 Dec 2022 13:14:37 +0100
+
+python-trio (0.21.0-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Robie Basak <robie@justgohome.co.uk>  Sun, 03 Jul 2022 14:32:43 +0100
+
+python-trio (0.20.0-1) unstable; urgency=medium
+
+  * New upstream release.
+    - Fixes FTBFS: OpenSSL on Python 3.10. Closes: #1009429.
+    - Fixes FTBFS on ppc64el due to a test hang caused by a pipe buffer
+      difference. Closes: #976937.
+  * Update Standards-Version to 4.6.1.
+
+ -- Robie Basak <robie@justgohome.co.uk>  Sat, 14 May 2022 17:05:54 +0100
+
 python-trio (0.19.0-1) unstable; urgency=medium
 
   * New upstream release. Closes: #998699.
