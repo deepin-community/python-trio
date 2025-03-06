@@ -1,10 +1,15 @@
 #!/usr/bin/make -f
 
 export PYBUILD_NAME=trio
-export PYBUILD_TEST_ARGS=-m "not redistributors_should_skip" -p trio._tests.pytest_plugin -k "not test_SocketType_resolve and not test_getprotobyname"
+export PYBUILD_TEST_ARGS=-m "not redistributors_should_skip" -p trio._tests.pytest_plugin --skip-optional-imports
+ifeq ($(PYBUILD_AUTOPKGTEST),1)
+PYBUILD_TEST_ARGS += /usr/lib/python3/dist-packages/trio
+else
+PYBUILD_TEST_ARGS += -k "not test_SocketType_resolve and not test_getprotobyname"
+endif
 
 %:
-	dh $@ --with python3,sphinxdoc --buildsystem=pybuild
+	dh $@ --buildsystem=pybuild
 
 execute_before_dh_sphinxdoc:
 ifeq (,$(findstring nodoc, $(DEB_BUILD_OPTIONS)))

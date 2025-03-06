@@ -4,20 +4,19 @@
 #
 # Upstream bug: https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=246350
 
-import select
 import os
-import threading
+import select
 
 r, w = os.pipe()
 
 os.set_blocking(w, False)
 
 print("filling pipe buffer")
-while True:
-    try:
+try:
+    while True:
         os.write(w, b"x")
-    except BlockingIOError:
-        break
+except BlockingIOError:
+    pass
 
 _, wfds, _ = select.select([], [w], [], 0)
 print("select() says the write pipe is", "writable" if w in wfds else "NOT writable")

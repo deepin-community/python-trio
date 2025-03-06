@@ -3,24 +3,24 @@ Date: Fri, 7 Jul 2023 06:24:43 +0000
 Subject: Use local objects.inv in intersphinx mapping.
 
 ---
- docs/source/conf.py | 43 +++++++++++++++++++++++++++++++++++++------
- 1 file changed, 37 insertions(+), 6 deletions(-)
+ docs/source/conf.py | 61 ++++++++++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 53 insertions(+), 8 deletions(-)
 
 diff --git a/docs/source/conf.py b/docs/source/conf.py
-index cfac665..c800a5e 100755
+index 2e84d91..f7612ab 100755
 --- a/docs/source/conf.py
 +++ b/docs/source/conf.py
-@@ -19,6 +19,8 @@
- import os
- import sys
+@@ -30,6 +30,8 @@ if TYPE_CHECKING:
+     from sphinx.application import Sphinx
+     from sphinx.util.typing import Inventory
  
 +import OpenSSL
 +
  # For our local_customization module
  sys.path.insert(0, os.path.abspath("."))
  # For trio itself
-@@ -93,12 +95,41 @@ extensions = [
-     "local_customization",
+@@ -223,14 +225,57 @@ extensions = [
+     "typevars",
  ]
  
 -intersphinx_mapping = {
@@ -28,42 +28,60 @@ index cfac665..c800a5e 100755
 -    "outcome": ("https://outcome.readthedocs.io/en/latest/", None),
 -    "pyopenssl": ("https://www.pyopenssl.org/en/stable/", None),
 -    "sniffio": ("https://sniffio.readthedocs.io/en/latest/", None),
+-    "trio-util": ("https://trio-util.readthedocs.io/en/latest/", None),
+-    "flake8-async": ("https://flake8-async.readthedocs.io/en/latest/", None),
 -}
-+def check_object_path(key, url, path):
++def check_object_path(
++    key: str, url: str, path: str
++) -> dict[str, tuple[str, str]]:
 +    if os.path.isfile(path):
 +        return {key: (url, path)}
 +    return {}
 +
++
 +intersphinx_mapping = {}
 +intersphinx_mapping.update(
 +    check_object_path(
-+        'python',
-+        'https://docs.python.org/',
-+        '/usr/share/doc/python' + '.'.join((str(x) for x in sys.version_info[:2])) + '/html/objects.inv'
++        "python",
++        "https://docs.python.org/",
++        "/usr/share/doc/python" + ".".join((str(x) for x in sys.version_info[:2])) + "/html/objects.inv"
 +    )
 +)
 +intersphinx_mapping.update(
 +    check_object_path(
-+        'pyopenssl',
-+        'https://www.pyopenssl.org/en/{v}'.format(v=OpenSSL.__version__),
-+        '/usr/share/doc/python-openssl-doc/html/objects.inv'
++        "pyopenssl",
++        "https://www.pyopenssl.org/en/{v}".format(v=OpenSSL.__version__),
++        "/usr/share/doc/python-openssl-doc/html/objects.inv"
 +    )
 +)
 +intersphinx_mapping.update(
 +    check_object_path(
-+        'outcome',
-+        'https://outcome.readthedocs.io/en/latest/',
-+        '/usr/share/doc/python-outcome-doc/html/objects.inv'
++        "outcome",
++        "https://outcome.readthedocs.io/en/latest/",
++        "/usr/share/doc/python-outcome-doc/html/objects.inv"
 +    )
 +)
 +intersphinx_mapping.update(
 +    check_object_path(
-+        'sniffio',
-+        'https://sniffio.readthedocs.io/en/latest/',
-+        '/usr/share/doc/python-sniffio-doc/html/objects.inv'
++        "sniffio",
++        "https://sniffio.readthedocs.io/en/latest/",
++        "/usr/share/doc/python-sniffio-doc/html/objects.inv"
 +    )
 +)
-+
++intersphinx_mapping.update(
++    check_object_path(
++        "trio-util",
++        "https://trio-util.readthedocs.io/en/latest/",
++        "/usr/share/doc/python-trio-util-doc/html/objects.inv"
++    )
++)
++intersphinx_mapping.update(
++    check_object_path(
++        "flake8-async",
++        "https://flake8-async.readthedocs.io/en/latest/",
++        "/usr/share/doc/python-flake8-async-doc/html/objects.inv"
++    )
++)
  
- autodoc_member_order = "bysource"
- 
+ # See https://sphinx-hoverxref.readthedocs.io/en/latest/configuration.html
+ hoverxref_auto_ref = True

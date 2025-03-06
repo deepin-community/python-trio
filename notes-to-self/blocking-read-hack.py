@@ -1,14 +1,21 @@
-import trio
+import errno
 import os
 import socket
-import errno
+
+import trio
 
 bad_socket = socket.socket()
+
 
 class BlockingReadTimeoutError(Exception):
     pass
 
-async def blocking_read_with_timeout(fd, count, timeout):
+
+async def blocking_read_with_timeout(
+    fd,
+    count,
+    timeout,  # noqa: ASYNC109  # manual timeout
+):
     print("reading from fd", fd)
     cancel_requested = False
 
@@ -41,5 +48,6 @@ async def blocking_read_with_timeout(fd, count, timeout):
             return data
     finally:
         os.close(new_fd)
+
 
 trio.run(blocking_read_with_timeout, 0, 10, 2)
